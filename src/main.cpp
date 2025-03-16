@@ -9,12 +9,19 @@
  #include <ArduinoOTA.h>
  #include <WebServer.h>
  #include <ESPmDNS.h>
+ #include <OneWire.h>
+ #include <DallasTemperature.h>
  
- // TODO: Jelszavakat később kiszedni a kódbál!!!
+ // TODO: Jelszavakat később kiszedni a kódból!!!
  const char* ssid = "Telekom-760933";
  const char* jelszo = "87630692866353068315";
  
  WebServer szerver(80);
+ 
+ // DS18B20 konfiguráció
+ #define ONE_WIRE_BUS 4
+ OneWire oneWire(ONE_WIRE_BUS);
+ DallasTemperature sensors(&oneWire);
  
  // Változók a kapcsolódási állapot követéséhez
  int kapcsolodasi_probalkozas = 0;
@@ -23,7 +30,10 @@
  // Mérési adatok
  float terheles = 0.0;
  float szog = 90.0;
+ float homerseklet = 0.0;
  unsigned long utolso_adatkuldes = 0;
+ unsigned long utolso_ho_meres = 0;
+ bool meres_folyamatban = false;
  
  String generaldHTML() {
    String html = R"rawliteral(
@@ -90,6 +100,10 @@
          margin: 1rem 0;
        }
  
+       .high-temp {
+         color: var(--danger) !important;
+       }
+ 
        .metric-unit {
          font-size: 1.2rem;
          color: #6c757d;
@@ -101,6 +115,17 @@
          height: 12px;
          border-radius: 50%;
          margin-right: 0.5rem;
+       }
+ 
+       .temp-alert {
+         animation: pulse 1s infinite;
+         margin-left: 0.5rem;
+       }
+ 
+       @keyframes pulse {
+         0% { opacity: 1; }
+         50% { opacity: 0.5; }
+         100% { opacity: 1; }
        }
  
        .connected { background: var(--success); }
@@ -161,6 +186,15 @@
              <span class="metric-unit">°</span>
            </div>
          </div>
+ 
+         <div class="card">
+           <h2>Hőmérséklet</h2>
+           <div class="metric-value">
+             <span id="homerseklet">0</span>
+             <span class="metric-unit">°C</span>
+             <span id="ho-riasztas" class="temp-alert" style="display: none;">⚠️</span>
+           </div>
+         </div>
        </div>
  
        <button onclick="handleRestart()">Eszköz újraindítása</button>
@@ -177,7 +211,19 @@
              // Adatok frissítése
              document.getElementById('terheles').textContent = data.terheles.toFixed(1);
              document.getElementById('szog').textContent = data.szog.toFixed(1);
+             const homersekletElem = document.getElementById('homerseklet');
+             homersekletElem.textContent = data.homerseklet.toFixed(1);
              
+             // Hőmérséklet riasztás
+             const riasztasElem = document.getElementById('ho-riasztas');
+             if(data.homerseklet > 37.4) {
+               homersekletElem.classList.add('high-temp');
+               riasztasElem.style.display = 'inline';
+             } else {
+               homersekletElem.classList.remove('high-temp');
+               riasztasElem.style.display = 'none';
+             }
+ 
              // Kapcsolat állapota
              const statusElem = document.getElementById('kapcsolat-statusz');
              const statusText = document.getElementById('kapcsolat-szoveg');
@@ -223,12 +269,11 @@
    String json = "{";
    json += "\"terheles\":" + String(terheles) + ",";
    json += "\"szog\":" + String(szog) + ",";
+   json += "\"homerseklet\":" + String(homerseklet) + ",";
    json += "\"kapcsolat\":" + String(wifi_connected ? "true" : "false");
    json += "}";
    szerver.send(200, "application/json", json);
  }
- 
- // A többi függvény változatlan marad...
  
  void handleRoot() {
    szerver.send(200, "text/html", generaldHTML());
@@ -264,6 +309,10 @@
    Serial.begin(115200);
    while(!Serial);
  
+   // Hőmérséklet szenzor inicializálása
+   sensors.begin();
+   sensors.setResolution(12);
+ 
    WiFi.mode(WIFI_STA);
    wifiCsatlakozas();
    
@@ -288,12 +337,27 @@
    szerver.handleClient();
    ArduinoOTA.handle();
    
+   // Mérési adatok frissítése
    if(millis() - utolso_adatkuldes > 100) {
      terheles = random(0, 100) / 10.0;
      szog = 90 + (random(0, 60) - 30);
      utolso_adatkuldes = millis();
    }
  
+   // Hőmérséklet mérése
+   static bool meres_folyamatban = false;
+   if(!meres_folyamatban && (millis() - utolso_ho_meres > 2000)) {
+     sensors.requestTemperatures();
+     utolso_ho_meres = millis();
+     meres_folyamatban = true;
+   }
+ 
+   if(meres_folyamatban && (millis() - utolso_ho_meres > 750)) {
+     homerseklet = sensors.getTempCByIndex(0);
+     meres_folyamatban = false;
+   }
+ 
+   // Kapcsolat ellenőrzése
    static unsigned long utolso_ellenorzes = 0;
    if(millis() - utolso_ellenorzes > 10000) {
      if(WiFi.status() != WL_CONNECTED) {
@@ -304,13 +368,3 @@
      utolso_ellenorzes = millis();
    }
  }
- 
- /*
-  * Ismert problémák:
-  * 1. Néha nem találja az IP címet elsőre
-  * 2. Újracsatlakozás nem mindig működik
-  * 
-  * Hibakeresési tippek:
-  * - router restart
-  * - COM port (ugyanoda kéne dugni)
-  */
